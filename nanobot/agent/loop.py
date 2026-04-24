@@ -200,6 +200,7 @@ class AgentLoop:
         self.restrict_to_workspace = restrict_to_workspace
         self._start_time = time.time()
         self._last_usage: dict[str, int] = {}
+        self._last_result = None
         self._extra_hooks: list[AgentHook] = hooks or []
 
         self.context = ContextBuilder(workspace, timezone=timezone)
@@ -358,6 +359,7 @@ class AgentLoop:
             concurrent_tools=True,
         ))
         self._last_usage = result.usage
+        self._last_result = result
         if result.stop_reason == "max_iterations":
             logger.warning("Max iterations ({}) reached", self.max_iterations)
         elif result.stop_reason == "error":
@@ -498,7 +500,7 @@ class AgentLoop:
             history = session.get_history(max_messages=0)
             current_role = "assistant" if msg.sender_id == "subagent" else "user"
             messages = self.context.build_messages(
-                history=history,
+                history=[],
                 current_message=msg.content, channel=channel, chat_id=chat_id,
                 current_role=current_role,
             )
@@ -533,7 +535,7 @@ class AgentLoop:
 
         history = session.get_history(max_messages=0)
         initial_messages = self.context.build_messages(
-            history=history,
+            history=[],
             current_message=msg.content,
             media=msg.media if msg.media else None,
             channel=msg.channel, chat_id=msg.chat_id,
@@ -547,13 +549,21 @@ class AgentLoop:
                 channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
             ))
 
-        final_content, _, all_msgs = await self._run_agent_loop(
+        _t0 = time.monotonic()
+        final_content, tools_used, all_msgs = await self._run_agent_loop(
             initial_messages,
             on_progress=on_progress or _bus_progress,
             on_stream=on_stream,
             on_stream_end=on_stream_end,
             channel=msg.channel, chat_id=msg.chat_id,
             message_id=msg.metadata.get("message_id"),
+        )
+        _p = self._last_usage.get("prompt_tokens", 0)
+        _c = self._last_usage.get("completion_tokens", 0)
+        _tools_str = ",".join(tools_used) if tools_used else "-"
+        logger.info(
+            "Perf: total={:.2f}s llm={:.2f}s tools={:.2f}s prompt={}tok completion={}tok tools=[{}]",
+            time.monotonic() - _t0, self._last_result.llm_s, self._last_result.tools_s, _p, _c, _tools_str,
         )
 
         if final_content is None:

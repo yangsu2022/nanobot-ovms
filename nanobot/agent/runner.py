@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 from typing import Any
+
+from loguru import logger
 
 from nanobot.agent.hook import AgentHook, AgentHookContext
 from nanobot.agent.tools.registry import ToolRegistry
@@ -47,6 +50,9 @@ class AgentRunResult:
     stop_reason: str = "completed"
     error: str | None = None
     tool_events: list[dict[str, str]] = field(default_factory=list)
+    elapsed_s: float = 0.0
+    llm_s: float = 0.0
+    tools_s: float = 0.0
 
 
 class AgentRunner:
@@ -64,6 +70,9 @@ class AgentRunner:
         error: str | None = None
         stop_reason = "completed"
         tool_events: list[dict[str, str]] = []
+        _turn_start = time.monotonic()
+        _total_llm_s = 0.0
+        _total_tools_s = 0.0
 
         for iteration in range(spec.max_iterations):
             context = AgentHookContext(iteration=iteration, messages=messages)
@@ -80,6 +89,7 @@ class AgentRunner:
             if spec.reasoning_effort is not None:
                 kwargs["reasoning_effort"] = spec.reasoning_effort
 
+            _llm_start = time.monotonic()
             if hook.wants_streaming():
                 async def _stream(delta: str) -> None:
                     await hook.on_stream(context, delta)
@@ -90,21 +100,29 @@ class AgentRunner:
                 )
             else:
                 response = await self.provider.chat_with_retry(**kwargs)
+            _llm_elapsed = time.monotonic() - _llm_start
+            _total_llm_s += _llm_elapsed
 
             raw_usage = response.usage or {}
             context.response = response
             context.usage = raw_usage
             context.tool_calls = list(response.tool_calls)
             # Accumulate standard fields into result usage.
-            usage["prompt_tokens"] = usage.get("prompt_tokens", 0) + int(raw_usage.get("prompt_tokens", 0) or 0)
-            usage["completion_tokens"] = usage.get("completion_tokens", 0) + int(raw_usage.get("completion_tokens", 0) or 0)
+            _prompt_tok = int(raw_usage.get("prompt_tokens", 0) or 0)
+            _comp_tok   = int(raw_usage.get("completion_tokens", 0) or 0)
+            usage["prompt_tokens"] = usage.get("prompt_tokens", 0) + _prompt_tok
+            usage["completion_tokens"] = usage.get("completion_tokens", 0) + _comp_tok
             cached = raw_usage.get("cached_tokens")
             if cached:
                 usage["cached_tokens"] = usage.get("cached_tokens", 0) + int(cached)
 
+
             if response.has_tool_calls:
                 if hook.wants_streaming():
                     await hook.on_stream_end(context, resuming=True)
+
+                unique_tool_calls = response.tool_calls
+                context.tool_calls = unique_tool_calls
 
                 messages.append(build_assistant_message(
                     response.content or "",
@@ -112,11 +130,14 @@ class AgentRunner:
                     reasoning_content=response.reasoning_content,
                     thinking_blocks=response.thinking_blocks,
                 ))
-                tools_used.extend(tc.name for tc in response.tool_calls)
+                tools_used.extend(tc.name for tc in unique_tool_calls)
 
                 await hook.before_execute_tools(context)
 
-                results, new_events, fatal_error = await self._execute_tools(spec, response.tool_calls)
+                _tool_start = time.monotonic()
+                results, new_events, fatal_error = await self._execute_tools(spec, unique_tool_calls)
+                _tool_elapsed = time.monotonic() - _tool_start
+                _total_tools_s += _tool_elapsed
                 tool_events.extend(new_events)
                 context.tool_results = list(results)
                 context.tool_events = list(new_events)
@@ -174,6 +195,9 @@ class AgentRunner:
             stop_reason=stop_reason,
             error=error,
             tool_events=tool_events,
+            elapsed_s=time.monotonic() - _turn_start,
+            llm_s=_total_llm_s,
+            tools_s=_total_tools_s,
         )
 
     async def _execute_tools(

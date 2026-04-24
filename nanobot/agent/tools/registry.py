@@ -1,5 +1,6 @@
 """Tool registry for dynamic tool management."""
 
+import os
 from typing import Any
 
 from nanobot.agent.tools.base import Tool
@@ -33,6 +34,10 @@ class ToolRegistry:
 
     def get_definitions(self) -> list[dict[str, Any]]:
         """Get all tool definitions in OpenAI format."""
+        allowed = os.environ.get("NANOBOT_TOOL_FILTER")
+        if allowed:
+            allowed_set = {t.strip() for t in allowed.split(",")}
+            return [tool.to_schema() for name, tool in self._tools.items() if name in allowed_set]
         return [tool.to_schema() for tool in self._tools.values()]
 
     async def execute(self, name: str, params: dict[str, Any]) -> Any:

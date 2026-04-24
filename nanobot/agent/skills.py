@@ -108,6 +108,8 @@ class SkillsLoader:
         Returns:
             XML-formatted skills summary.
         """
+        if os.environ.get("NANOBOT_SKILLS_FILTER", "").lower() == "off":
+            return ""
         all_skills = self.list_skills(filter_unavailable=False)
         if not all_skills:
             return ""
@@ -123,17 +125,16 @@ class SkillsLoader:
             skill_meta = self._get_skill_meta(s["name"])
             available = self._check_requirements(skill_meta)
 
-            lines.append(f"  <skill available=\"{str(available).lower()}\">")
+            if not available:
+                continue
+
+            if (self.get_skill_metadata(s["name"]) or {}).get("hidden") == "true":
+                continue
+
+            lines.append(f"  <skill>")
             lines.append(f"    <name>{name}</name>")
             lines.append(f"    <description>{desc}</description>")
             lines.append(f"    <location>{path}</location>")
-
-            # Show missing requirements for unavailable skills
-            if not available:
-                missing = self._get_missing_requirements(skill_meta)
-                if missing:
-                    lines.append(f"    <requires>{escape_xml(missing)}</requires>")
-
             lines.append("  </skill>")
         lines.append("</skills>")
 

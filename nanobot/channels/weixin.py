@@ -746,6 +746,10 @@ class WeixinChannel(BaseChannel):
         if not content:
             return
 
+        # Prepend /no_think to disable Qwen3 thinking mode for faster responses
+        if not content.lstrip().startswith("/"):
+            content = "/no_think " + content
+
         await self._handle_message(
             sender_id=from_user_id,
             chat_id=from_user_id,
